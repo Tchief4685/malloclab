@@ -1,0 +1,10 @@
+# compiled source
+*.a
+*.out
+
+# os generated files
+.DS_Store?
+Thumbs.db
+
+# miscellaneous
+.gdbinit
