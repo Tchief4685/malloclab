@@ -25,7 +25,7 @@
 #include "mm.h"
 #include "memlib.h"
 
-team_t team = {"","","","",""}; /* so we're compatible with 15213 driver */
+team_t team = {"jespin","James Espinosa","jespin","",""}; /* so we're compatible with 15213 driver */
 
 /* $begin mallocmacros */
 /* Basic constants and macros */
