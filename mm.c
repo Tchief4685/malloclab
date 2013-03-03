@@ -33,6 +33,7 @@ team_t team = {"jespin","James Espinosa","jespin","",""}; /* so we're compatible
 #define DSIZE       8       /* doubleword size (bytes) */
 #define CHUNKSIZE  (1<<12)  /* initial heap size (bytes) */
 #define OVERHEAD    8       /* overhead of header and footer (bytes) */
+#define PROLOGSIZE  16      /* default prologue block size */
 
 #define MAX(x, y) ((x) > (y)? (x) : (y))  
 
