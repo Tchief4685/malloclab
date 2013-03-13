@@ -27,6 +27,18 @@
 
 team_t team = {"jespin","James Espinosa","jespin","",""}; /* so we're compatible with 15213 driver */
 
+ /* Additional macros */
+#define PROLOGSIZE 16
+#define ALIGNMENT 8
+#define ALIGN(size) (((size) + (ALIGNMENT-1)) & ~0x7)
+#define SIZET_SIZE (ALIGN(sizeof(size_t)))
+
+ /* Linked list macros */
+#define PREV(bp)    ((char *)(bp) - DSIZE)
+#define NEXT(bp)    ((char *)(bp) - WSIZE)
+#define GET_PREV(p) (GET(p+WSIZE))
+#define GET_NEXT(p) (GET(p+DSIZE))
+
 /* $begin mallocmacros */
 /* Basic constants and macros */
 #define WSIZE       4       /* word size (bytes) */  
@@ -57,7 +69,8 @@ team_t team = {"jespin","James Espinosa","jespin","",""}; /* so we're compatible
 /* $end mallocmacros */
 
 /* The only global variable is a pointer to the first block */
-static char *heap_listp;   
+static char *heap_listp;
+static char *free_lsthdr;   /* Global pointer to explicit list header */
 
 /* function prototypes for internal helper routines */
 static void *extend_heap(size_t words);
@@ -67,6 +80,10 @@ static void *coalesce(void *bp);
 static void printblock(void *bp); 
 static void checkblock(void *bp);
 
+/* Linked list functions */
+static void mm_insert(void *bp); /* Insert block *bp to the free list */
+static void mm_remove(void *bp); /* Remove block *bp from the free list */
+
 /* 
  * mm_init - Initialize the memory manager 
  */
@@ -74,13 +91,18 @@ static void checkblock(void *bp);
 int mm_init(void) 
 {
     /* create the initial empty heap */
-    if ((heap_listp = mem_sbrk(4*WSIZE)) == NULL)
+    if ((heap_listp = mem_sbrk(PROLOGSIZE)) == NULL)
         return -1;
     PUT(heap_listp, 0);                        /* alignment padding */
-    PUT(heap_listp+WSIZE, PACK(OVERHEAD, 1));  /* prologue header */ 
-    PUT(heap_listp+DSIZE, PACK(OVERHEAD, 1));  /* prologue footer */ 
-    PUT(heap_listp+WSIZE+DSIZE, PACK(0, 1));   /* epilogue header */
-    heap_listp += DSIZE;
+    free_lsthdr = heap_listp;
+    *(size_t *)(free_lsthdr+WSIZE) = free_lsthdr;
+    *(size_t *)(free_lsthdr+DSIZE) = free_lsthdr;
+
+    printf("[DEBUG] free_lsthdr=%d, free_lsthdr point to %d\n", free_lsthdr, *(int *)free_lsthdr);
+    PUT(heap_listp+WSIZE+DSIZE+DSIZE, PACK(PROLOGSIZE, 1)); /* Header */
+    PUT(heap_listp+DSIZE+DSIZE+DSIZE, PACK(PROLOGSIZE, 1)); /* Footer */
+    PUT(heap_listp+WSIZE+DSIZE+DSIZE, PACK(0,1));
+    heap_listp += (DSIZE+DSIZE+DSIZE);
 
     /* Extend the empty heap with a free block of CHUNKSIZE bytes */
     if (extend_heap(CHUNKSIZE/WSIZE) == NULL)
