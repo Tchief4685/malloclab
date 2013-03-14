@@ -25,27 +25,27 @@
 #include "mm.h"
 #include "memlib.h"
 
-team_t team = {"jepsin","James Espinosa", "jespin"," "," "}; /* so we're compatible with 15213 driver */
+team_t team = {"jepsin11mdemali","James Espinosa", "jespin11","Matt Demali","mdemali"}; /* so we're compatible with 15213 driver */
 
 /* $begin mallocmacros */
-
-/* Additional Macros */
-#define PADDING    4
-#define PROLOGSIZE 16
-#define GETLEFT(bp) ((void *)* (int *)(bp))
-#define GETRIGHT(bp) ((void *)* (int *)(bp+WSIZE))
-#define SETLEFT(bp, bq) (*(int *)(bp)) = (int)(bq)
-#define SETRIGHT(bp, bq) (*(int *)(bp+WSIZE)) = (int)(bq)
-#define GETSIZE(bp) ((*(int*) (bp-WSIZE)) & ~7)
-#define ADJUSTSIZE(size) ((((size) + DSIZE + 7) / DSIZE ) * DSIZE)
-
 /* Basic constants and macros */
 #define WSIZE       4       /* word size (bytes) */  
 #define DSIZE       8       /* doubleword size (bytes) */
 #define CHUNKSIZE  (1<<12)   /* initial heap size (bytes) */
 #define OVERHEAD    8       /* overhead of header and footer (bytes) */
 
-#define MAX(x, y) ((x) > (y)? (x) : (y))  
+#define MAX(x, y) ((x) > (y)? (x) : (y))
+
+/* Additional constants and macros */
+#define PADDING    4
+#define PROLOGSIZE 16
+#define EPILOGSIZE 8
+#define RIGHT(bp) ((void *)* (int *)(bp+WSIZE))
+#define LEFT(bp) ((void *)* (int *)(bp))
+#define SETLEFT(bp, bq) (*(int *)(bp)) = (int)(bq)
+#define ADJUSTSIZE(size) ((((size) + DSIZE + 7) / DSIZE ) * DSIZE)
+#define SETRIGHT(bp, bq) (*(int *)(bp+WSIZE)) = (int)(bq)
+#define GETSIZE(bp) ((*(int*) (bp-WSIZE)) & ~7)
 
 /* Pack a size and allocated bit into a word */
 #define PACK(size, alloc)  ((size) | (alloc))
@@ -65,12 +65,11 @@ team_t team = {"jepsin","James Espinosa", "jespin"," "," "}; /* so we're compati
 /* Given block ptr bp, compute address of next and previous blocks */
 #define NEXT_BLKP(bp)  ((char *)(bp) + GET_SIZE(((char *)(bp) - WSIZE)))
 #define PREV_BLKP(bp)  ((char *)(bp) - GET_SIZE(((char *)(bp) - DSIZE)))
-
 /* $end mallocmacros */
 
 /* The only global variable is a pointer to the first block */
 static char *heap_listp;
-static void *tree_root;   
+static void *tree_root;
 
 /* function prototypes for internal helper routines */
 static void *extend_heap(size_t words);
@@ -80,17 +79,15 @@ static void *coalesce(void *bp);
 static void printblock(void *bp); 
 static void checkblock(void *bp);
 
-/* Tree functions Declaration */
-void *treeInsert(void *rt, void *bp);
-void *treeRemove(void *rt, void *bp);
-void *ceiling(void *rt,  int size);
-
-/* Tree Helper Function Declarations  */
-void *getParent(void *rt, void *bp);
+/* Additional function declarations */
+void *mm_insert(void *rt, void *bp);
+void *mm_remove(void *rt, void *bp);
+void *mm_ceiling(void *rt,  int size);
+void *mm_parent(void *rt, void *bp);
+void *mm_replace(void *bp);
 void *removeFruitless(void *rt, void *bp);
 void *removeOnlyChild(void *rt, void *bp);
 void *remove2Kids(void *rt, void *bp);
-void *findReplacement(void *bp);
 int countChildren(void *rt);
 
 /* 
@@ -103,6 +100,7 @@ int mm_init(void)
 
     tree_root = NULL;
 
+    /* Create the initial empty heap */
     if ((heap_listp = mem_sbrk(PROLOGSIZE)) == NULL)
         return -1;
 
@@ -118,7 +116,7 @@ int mm_init(void)
     if (bp == NULL)
         return -1;
 
-    tree_root = treeInsert(tree_root, bp);
+    tree_root = mm_insert(tree_root, bp);
 
     return 0;
 }
@@ -132,8 +130,8 @@ void *mm_malloc(size_t size)
 {
     size_t asize;      /* adjusted block size */
     size_t extendsize; /* amount to extend heap if no fit */
-   
-    char *bp;   
+    char *bp;
+
     /* Ignore spurious requests */
     if (size <= 0)
         return NULL;
@@ -145,12 +143,13 @@ void *mm_malloc(size_t size)
         asize = DSIZE * ((size + (OVERHEAD) + (DSIZE-1)) / DSIZE);
     
     /* Search the free list for a fit */
-    if ((bp = ceiling(tree_root,asize)) != NULL) 
+    if ((bp = mm_ceiling(tree_root,asize)) != NULL) 
     {
-        tree_root = treeRemove(tree_root,bp);
+        tree_root = mm_remove(tree_root,bp);
         bp = place(bp, asize);
         return bp;
-    }    
+    }
+
     /* No fit found. Get more memory and place the block */
     extendsize = MAX(asize,CHUNKSIZE);
 
@@ -173,7 +172,8 @@ void mm_free(void *bp)
 
     PUT(HDRP(bp), PACK(size, 0));
     PUT(FTRP(bp), PACK(size, 0));
-    tree_root = treeInsert(tree_root,coalesce(bp));
+
+    tree_root = mm_insert(tree_root,coalesce(bp));
 }
 
 /* $end mmfree */
@@ -200,7 +200,7 @@ void *mm_realloc(void *ptr, size_t size)
         PUT(HDRP(nBlock), PACK(nsize,0));
         //nBlock = nBlock + WSIZE;
         PUT(FTRP(nBlock), PACK(nsize, 0));
-        tree_root = treeInsert(tree_root, nBlock);
+        tree_root = mm_insert(tree_root, nBlock);
         
         return ptr;     
     }
@@ -215,7 +215,7 @@ void *mm_realloc(void *ptr, size_t size)
         {
         
             size_t nsize = total - asize;
-            tree_root = treeRemove(tree_root,bp);
+            tree_root = mm_remove(tree_root,bp);
             
             if(nsize < 16)
             {
@@ -231,7 +231,7 @@ void *mm_realloc(void *ptr, size_t size)
                 void *nBlock = NEXT_BLKP(ptr);
                 PUT(HDRP(nBlock), PACK(nsize,0));
                 PUT(FTRP(nBlock), PACK(nsize,0));
-                tree_root = treeInsert(tree_root, nBlock);
+                tree_root = mm_insert(tree_root, nBlock);
                 
                 return ptr;
             }                                    
@@ -249,14 +249,14 @@ void *mm_realloc(void *ptr, size_t size)
             void *nBlock = NEXT_BLKP(ptr);
             PUT(HDRP(nBlock), PACK(nsize,0));
             PUT(FTRP(nBlock), PACK(nsize,0));
-            tree_root = treeInsert(tree_root, nBlock);
+            tree_root = mm_insert(tree_root, nBlock);
             return ptr;
         }                                                       
     }
     
     bp = mm_malloc(size);
     
-    memcpy(bp, ptr, (GETSIZE(ptr) - 8));
+    memcpy(bp, ptr, (GETSIZE(ptr) - DSIZE));
     mm_free(ptr);
     return bp;  
 }
@@ -269,27 +269,27 @@ void mm_checkheap(int verbose)
     char *bp = heap_listp;
 
     if (verbose) {
-    printf("Heap (%p):\n", heap_listp);
-    printf("root: %p\n", tree_root);
+        printf("Heap (%p):\n", heap_listp);
+        printf("Root (%p):\n", tree_root);
     }
 
     if ((GET_SIZE(HDRP(heap_listp)) != DSIZE) || !GET_ALLOC(HDRP(heap_listp)))
-    printf("Bad prologue header\n");
+        printf("Bad prologue header\n");
+    
     checkblock(heap_listp);
 
     for (bp = heap_listp; GET_SIZE(HDRP(bp)) > 0; bp = NEXT_BLKP(bp)) {
-    if (verbose)
-    { 
-        printblock(bp);
-                
-    }
-    checkblock(bp);
+        if (verbose)
+            printblock(bp);
+
+        checkblock(bp);
     }
      
     if (verbose)
-    printblock(bp);
+        printblock(bp);
+
     if ((GET_SIZE(HDRP(bp)) != 0) || !(GET_ALLOC(HDRP(bp))))
-    printf("Bad epilogue header\n");
+        printf("Bad epilogue header\n");
 }
 
 /* The remaining routines are internal helper routines */
@@ -306,7 +306,7 @@ static void *extend_heap(size_t words)
     /* Allocate an even number of words to maintain alignment */
     size = (words % 2) ? (words+1) * WSIZE : words * WSIZE;
     if ((int)(bp = mem_sbrk(size)) == -1) 
-    return NULL;
+        return NULL;
 
     /* Initialize free block header/footer and the epilogue header */
     PUT(HDRP(bp), PACK(size, 0));         /* free block header */
@@ -327,41 +327,37 @@ static void *extend_heap(size_t words)
 static void *place(void *bp, size_t asize)
 /* $end mmplace-proto */
 {
-
-    
     size_t csize = GET_SIZE(HDRP(bp));
-    size_t ssize = csize - asize; //split size   
-    if (ssize >= (DSIZE + OVERHEAD)) //if the remainder is bigger than or equal 16 split  
-    {
-    
-        size_t avg = ( GETSIZE(NEXT_BLKP(bp)) + GETSIZE(PREV_BLKP(bp)) )/2; 
-        void* larger;
-        void* smaller;
+    size_t split_size = (csize - asize);
+
+    if (split_size >= (DSIZE + OVERHEAD)) {
+        size_t avg = (GETSIZE(NEXT_BLKP(bp)) + GETSIZE(PREV_BLKP(bp)))/2; 
+        void* large;
+        void* small;
         int side; // 0: split off end | 1: Split off front
         
-        //find which side is larger and whcih side is smaller
         if(GETSIZE(NEXT_BLKP(bp)) > GETSIZE(PREV_BLKP(bp)))
         {
-            larger = NEXT_BLKP(bp);
-            smaller = PREV_BLKP(bp);
+            large = NEXT_BLKP(bp);
+            small = PREV_BLKP(bp);
         }
         else
         {
-            larger = PREV_BLKP(bp);
-            smaller = NEXT_BLKP(bp);
+            large = PREV_BLKP(bp);
+            small = NEXT_BLKP(bp);
         }
          
         //check if we should split off of the front or back
         if(asize > avg)
         {
-            if(PREV_BLKP(bp) == larger)
+            if(PREV_BLKP(bp) == large)
                 side = 0;
             else 
                 side = 1;           
         }
         else
         {
-            if(PREV_BLKP(bp) == larger)
+            if(PREV_BLKP(bp) == large)
                 side = 1;
             else 
                 side = 0;
@@ -376,19 +372,19 @@ static void *place(void *bp, size_t asize)
             void* split = NEXT_BLKP(bp);
             PUT(HDRP(split), PACK(csize-asize, 0));
             PUT(FTRP(split), PACK(csize-asize, 0));
-            tree_root = treeInsert(tree_root,split);
+            tree_root = mm_insert(tree_root,split);
             return bp;
         }
         else
         {
             //split off the front
-            PUT(HDRP(bp), PACK(ssize,0));
-            PUT(FTRP(bp), PACK(ssize,0));
+            PUT(HDRP(bp), PACK(split_size,0));
+            PUT(FTRP(bp), PACK(split_size,0));
         
             void *aBlock = NEXT_BLKP(bp);
             PUT(HDRP(aBlock), PACK(asize, 1));
             PUT(FTRP(aBlock), PACK(asize, 1));
-            tree_root = treeInsert(tree_root,bp);
+            tree_root = mm_insert(tree_root,bp);
             return aBlock;
         }
     }
@@ -413,9 +409,9 @@ static void *find_fit(size_t asize)
 
     /* first fit search */
     for (bp = heap_listp; GET_SIZE(HDRP(bp)) > 0; bp = NEXT_BLKP(bp)) {
-    if (!GET_ALLOC(HDRP(bp)) && (asize <= GET_SIZE(HDRP(bp)))) {
-        return bp;
-    }
+        if (!GET_ALLOC(HDRP(bp)) && (asize <= GET_SIZE(HDRP(bp)))) {
+            return bp;
+        }
     }
     return NULL; /* no fit */
 }
@@ -437,27 +433,39 @@ static void *coalesce(void *bp)
 
     else if (prev_alloc && !next_alloc) {      /* Case 2: Only the previous is allocated*/
         size += GET_SIZE(HDRP(NEXT_BLKP(bp)));
-        tree_root = treeRemove(tree_root, NEXT_BLKP(bp));
+
+        /* If only the previous block is allocated, remove the next block */
+        tree_root = mm_remove(tree_root, NEXT_BLKP(bp));
+
         PUT(HDRP(bp), PACK(size, 0));
         PUT(FTRP(bp), PACK(size,0));
+
         return(bp);
     }
 
     else if (!prev_alloc && next_alloc) {      /* Case 3: Only the next is allocated */
         size += GET_SIZE(HDRP(PREV_BLKP(bp)));
-        tree_root = treeRemove(tree_root, PREV_BLKP(bp));
+
+        /* If only the next block is allocated, remove the previous block */
+        tree_root = mm_remove(tree_root, PREV_BLKP(bp));
+
         PUT(FTRP(bp), PACK(size, 0));
         PUT(HDRP(PREV_BLKP(bp)), PACK(size, 0));
+
         return(PREV_BLKP(bp));
     }
 
     else {                                     /* Case 4: Neither are allocated */
         size += GET_SIZE(HDRP(PREV_BLKP(bp))) + 
-        GET_SIZE(FTRP(NEXT_BLKP(bp)));
-        tree_root = treeRemove(tree_root, NEXT_BLKP(bp));
-        tree_root = treeRemove(tree_root, PREV_BLKP(bp));        
+            GET_SIZE(FTRP(NEXT_BLKP(bp)));
+
+        /* If neither blocks are allocated, remove them both */
+        tree_root = mm_remove(tree_root, NEXT_BLKP(bp));
+        tree_root = mm_remove(tree_root, PREV_BLKP(bp));
+
         PUT(HDRP(PREV_BLKP(bp)), PACK(size, 0));
         PUT(FTRP(NEXT_BLKP(bp)), PACK(size, 0));
+
         return(PREV_BLKP(bp));
     }
 }
@@ -473,26 +481,19 @@ static void printblock(void *bp)
     falloc = GET_ALLOC(FTRP(bp));  
 
     if (hsize == 0) {
-    printf("%p: EOL\n", bp);
+        printf("%p: EOL\n", bp);
     return;
     }
 
     if (bp == heap_listp) {
-      printf("%p: header: [%d:%c] footer: [%d:%c]\n", bp, 
-         hsize, (halloc ? 'a' : 'f'), 
-         fsize, (falloc ? 'a' : 'f')); 
+      printf("%p: header: [%d:%c] footer: [%d:%c]\n", bp, hsize, (halloc ? 'a' : 'f'), fsize, (falloc ? 'a' : 'f')); 
 
     } else if (!halloc) {
-      printf("%p: header: [%d:%c] | left: %p, right: %p | footer: [%d:%c]\n", bp, 
-         hsize, (halloc ? 'a' : 'f'), 
-         GETLEFT(bp),
-         GETRIGHT(bp),
-         fsize, (falloc ? 'a' : 'f')); 
+      printf("%p: header: [%d:%c] | left: %p, right: %p | footer: [%d:%c]\n", bp, hsize, (halloc ? 'a' : 'f'),
+         LEFT(bp), RIGHT(bp), fsize, (falloc ? 'a' : 'f')); 
 
     } else {
-      printf("%p: header: [%d:%c] footer: [%d:%c]\n", bp, 
-         hsize, (halloc ? 'a' : 'f'), 
-         fsize, (falloc ? 'a' : 'f')); 
+      printf("%p: header: [%d:%c] footer: [%d:%c]\n", bp, hsize, (halloc ? 'a' : 'f'), fsize, (falloc ? 'a' : 'f')); 
     }
   
 }
@@ -500,12 +501,10 @@ static void printblock(void *bp)
 static void checkblock(void *bp) 
 {
     if ((size_t)bp % 8)
-    printf("Error: %p is not doubleword aligned\n", bp);
+        printf("Error: %p is not doubleword aligned\n", bp);
     if (GET(HDRP(bp)) != GET(FTRP(bp)))
-    printf("Error: header does not match footer\n");
+        printf("Error: header does not match footer\n");
 }
-
-/* Tree Functions */
 
 /*
 *Inserts a free block of memory into the Binary Tree and returns a pointer 
@@ -515,7 +514,7 @@ static void checkblock(void *bp)
 *@param bp  Pointer to the node to be inserted into the tree
 *@return    Pointer to the new root of the tree
 */
-void *treeInsert(void *rt, void* bp)
+void *mm_insert(void *rt, void* bp)
 {
     //if the tree is empty set the leaves of the node to NULL and return
     if(rt == NULL)
@@ -527,13 +526,13 @@ void *treeInsert(void *rt, void* bp)
     //if the new node bp is smaller or equal to the current node rt insert it into the left subtree
     else if(GETSIZE(bp) <= GETSIZE(rt))
     {
-        SETLEFT(rt, treeInsert(GETLEFT(rt),bp));
+        SETLEFT(rt, mm_insert(LEFT(rt),bp));
         return rt;
     }
     //if the new node bp is larger than the current node rt insert rt into the right subtree
     else if(GETSIZE(bp) >  GETSIZE(rt))
     {
-        SETRIGHT(rt, treeInsert(GETRIGHT(rt),bp));
+        SETRIGHT(rt, mm_insert(RIGHT(rt),bp));
         return rt;
     }
     
@@ -550,7 +549,7 @@ void *treeInsert(void *rt, void* bp)
 *@return    Pointer to the new root of the tree, returns NULL if tree is empty
 */
 
-void *treeRemove(void *rt, void *bp)
+void *mm_remove(void *rt, void *bp)
 {
     if(countChildren(bp) == 0)  //If there are no children call removeFruitless
         return removeFruitless(rt, bp);
@@ -568,7 +567,7 @@ void *treeRemove(void *rt, void *bp)
 *@param bp  Size that we are looking for
 *@return    Pointer to the node that is the best size, returns NULL if tree is empty
 */
-void * ceiling(void* rt, int size)
+void * mm_ceiling(void* rt, int size)
 {
     void* candidate; //stores the current best fit that has been found
     
@@ -581,9 +580,9 @@ void * ceiling(void* rt, int size)
     if(rtSize  ==  size)//check if the current node is a perfect fit
         return rt;
     else if(rtSize > size)// if the node is bigger check the left and store it in candidate
-        candidate = ceiling(GETLEFT(rt), size);
+        candidate = mm_ceiling(LEFT(rt), size);
     else if (rtSize < size)// if node is small check the right and store it in candidate
-        candidate = ceiling(GETRIGHT(rt), size);
+        candidate = mm_ceiling(RIGHT(rt), size);
     
     //if child is NULL check if it can fit in current Node, if it is not return NULL
     if(candidate == NULL)
@@ -610,23 +609,23 @@ void * ceiling(void* rt, int size)
 *@param bp  Pointer to the node that is looking for its parent
 *@return    Pointer to the parent of the given node bp, returns NULL if bp us the root
 */
-void *getParent(void *rt, void *bp)
+void *mm_parent(void *rt, void *bp)
 {
     if(bp == rt) //if the node is the root return NULL
         return NULL;
     if(GETSIZE(bp) <= GETSIZE(rt)) //if the size of bp is less than or equal to the size of the current node rt 
     {
-        if(GETLEFT(rt) == bp)//check if the child on the left is bp, if it is return the current node
+        if(LEFT(rt) == bp)//check if the child on the left is bp, if it is return the current node
             return rt;
         else //if the left child is not bp check its children
-            return getParent(GETLEFT(rt),bp);
+            return mm_parent(LEFT(rt),bp);
     }
     else //if the size of bp is great than the size of the current node rt 
     {
-        if(GETRIGHT(rt) == bp) // check if the right child is bp, if it is return the current node
+        if(RIGHT(rt) == bp) // check if the right child is bp, if it is return the current node
             return rt;
         else //if the right child is not bp check the children of the right child
-            return getParent(GETRIGHT(rt),bp);
+            return mm_parent(RIGHT(rt),bp);
     }
 } 
 
@@ -639,9 +638,9 @@ void *getParent(void *rt, void *bp)
 int countChildren(void *rt)
 {
     int count = 0;// counter startting at 0
-    if(GETLEFT(rt) != NULL)//if there is a child on the left increase the counter
+    if(LEFT(rt) != NULL)//if there is a child on the left increase the counter
          count++;
-    if(GETRIGHT(rt) != NULL)//if there is a child on the right increase the counter
+    if(RIGHT(rt) != NULL)//if there is a child on the right increase the counter
          count++;
                             
     return count;// return the final count
@@ -657,12 +656,12 @@ int countChildren(void *rt)
 */
 void *removeFruitless(void *rt, void *bp)
 {
-    void *pt = getParent(rt, bp); //stores the parent of the node bp
+    void *pt = mm_parent(rt, bp); //stores the parent of the node bp
     
     if(pt != NULL)//if the parent is not NULL 
     {
         //check which side the node bp is on of the parent then have it point to NULL
-        if(GETLEFT(pt) == bp) 
+        if(LEFT(pt) == bp) 
             SETLEFT(pt, NULL);
         else 
             SETRIGHT(pt, NULL);
@@ -687,17 +686,17 @@ void *removeOnlyChild(void *rt, void* bp)
     void *child;//store the child of bp
     
     //gets the child of bp
-    if(GETLEFT(bp) != NULL)
-        child = GETLEFT(bp);
+    if(LEFT(bp) != NULL)
+        child = LEFT(bp);
     else
-        child = GETRIGHT(bp);
+        child = RIGHT(bp);
                 
-    void *pt = getParent(rt, bp); //get the parent of bp
+    void *pt = mm_parent(rt, bp); //get the parent of bp
 
     //if bp is not the root replace its child with the child of its child
     if(pt != NULL)
     {
-        if(GETLEFT(pt) == bp)
+        if(LEFT(pt) == bp)
             SETLEFT(pt, child);
         else 
             SETRIGHT(pt, child); 
@@ -719,20 +718,20 @@ void *removeOnlyChild(void *rt, void* bp)
 */
 void *remove2Kids(void *rt, void *bp)
 {
-    void *pt = getParent(rt, bp); //gets the parent of bp
-    void *replacement = findReplacement(GETLEFT(bp)); //gets the replacement for the removed node bp
+    void *pt = mm_parent(rt, bp); //gets the parent of bp
+    void *replacement = mm_replace(LEFT(bp)); //gets the replacement for the removed node bp
     
     void *bpLeft; //stores the new tree after replacement has been removed
     
-    bpLeft = treeRemove(GETLEFT(bp), replacement);//removes the replacement and stores the new tree
+    bpLeft = mm_remove(LEFT(bp), replacement);//removes the replacement and stores the new tree
     
     //set the children of the replacement to bp's children
     SETLEFT(replacement, bpLeft);
-    SETRIGHT(replacement, GETRIGHT(bp));
+    SETRIGHT(replacement, RIGHT(bp));
     
     if(pt != NULL)// if it is not the root insert the replacement 
     {
-        if(GETLEFT(pt) == bp)
+        if(LEFT(pt) == bp)
             SETLEFT(pt, replacement);
         else
             SETRIGHT(pt, replacement);
@@ -751,10 +750,10 @@ void *remove2Kids(void *rt, void *bp)
 *@param bp  the left node of the node being replaced
 *@return    node that is to be a replacement
 */
-void *findReplacement(void *bp)
+void *mm_replace(void *bp)
 {
-     if(GETRIGHT(bp) == NULL) //check if there right is NULL, if it is return bp
+     if(RIGHT(bp) == NULL) //check if there right is NULL, if it is return bp
         return bp;
      else //if the right is not NULL keep going right
-        return findReplacement(GETRIGHT(bp));
+        return mm_replace(RIGHT(bp));
 }
