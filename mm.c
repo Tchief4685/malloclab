@@ -188,19 +188,16 @@ void *mm_realloc(void *ptr, size_t size)
 
     if(!GETSIZE(NEXT_BLKP(ptr)))
     {
-        size_t size_increase = MAX(asize, CHUNKSIZE); 
-        bp = extend_heap(size_increase/WSIZE);
-        size_t nsize = size_increase + GETSIZE(ptr) - asize;
-        void *blk = NEXT_BLKP(ptr);       
+        size_t extendsize = MAX(asize, CHUNKSIZE);
+        bp = extend_heap(extendsize/4);
+        size_t nsize = extendsize + GETSIZE(ptr) - asize;
         
         PUT(HDRP(ptr), PACK(asize,1));
         PUT(FTRP(ptr), PACK(asize,1));
 
-        /* Lets split up any extra blocks */
-
-        PUT(HDRP(blk), PACK(nsize, 0));
+        void *blk = NEXT_BLKP(ptr);
+        PUT(HDRP(blk), PACK(nsize,0));
         PUT(FTRP(blk), PACK(nsize, 0));
-
         tree_root = mm_insert(tree_root, blk);
         
         return ptr;     
@@ -211,7 +208,7 @@ void *mm_realloc(void *ptr, size_t size)
         bp = NEXT_BLKP(ptr);
         
         size_t total = GETSIZE(ptr) + GETSIZE(bp);
-            
+
         if(total >= asize)
         {
             size_t nsize = total - asize;
@@ -236,22 +233,22 @@ void *mm_realloc(void *ptr, size_t size)
                 return ptr;
             }                                    
         }
-        
+
         else if(!GETSIZE(NEXT_BLKP(bp)))
         {
-            size_t size_increase = MAX(asize, CHUNKSIZE);
-            extend_heap(size_increase/WSIZE);
-            size_t nsize = size_increase + total - asize;
-            void *blk = NEXT_BLKP(ptr);
+            size_t extendsize = MAX(asize, CHUNKSIZE);
+            extend_heap(extendsize/4);
+            size_t nsize = extendsize + total - asize;
             
             PUT(HDRP(ptr), PACK(asize,1));
             PUT(FTRP(ptr), PACK(asize,1));
+
+            void *blk = NEXT_BLKP(ptr);
             PUT(HDRP(blk), PACK(nsize,0));
             PUT(FTRP(blk), PACK(nsize,0));
-
             tree_root = mm_insert(tree_root, blk);
             return ptr;
-        }                                                       
+        }
     }
     
     bp = mm_malloc(size);
