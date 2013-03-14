@@ -30,15 +30,14 @@ team_t team = {"jepsin","James Espinosa", "jespin"," "," "}; /* so we're compati
 /* $begin mallocmacros */
 
 /* Additional Macros */
+#define PADDING    4
 #define PROLOGSIZE 16
-
-/* Tree Macros */
-
 #define GETLEFT(bp) ((void *)* (int *)(bp))
-#define GETRIGHT(bp) ((void *)* (int *)(bp+4))
+#define GETRIGHT(bp) ((void *)* (int *)(bp+WSIZE))
 #define SETLEFT(bp, bq) (*(int *)(bp)) = (int)(bq)
-#define SETRIGHT(bp, bq) (*(int *)(bp+4)) = (int)(bq)
-#define GETSIZE(bp) ((*(int*) (bp-4)) & ~7)
+#define SETRIGHT(bp, bq) (*(int *)(bp+WSIZE)) = (int)(bq)
+#define GETSIZE(bp) ((*(int*) (bp-WSIZE)) & ~7)
+#define ADJUSTSIZE(size) ((((size) + DSIZE + 7) / DSIZE ) * DSIZE)
 
 /* Basic constants and macros */
 #define WSIZE       4       /* word size (bytes) */  
@@ -67,12 +66,11 @@ team_t team = {"jepsin","James Espinosa", "jespin"," "," "}; /* so we're compati
 #define NEXT_BLKP(bp)  ((char *)(bp) + GET_SIZE(((char *)(bp) - WSIZE)))
 #define PREV_BLKP(bp)  ((char *)(bp) - GET_SIZE(((char *)(bp) - DSIZE)))
 
-#define ADJUSTSIZE(size) ((((size) + 8 + 7) / 8 ) * 8)
-
 /* $end mallocmacros */
 
 /* The only global variable is a pointer to the first block */
-static char *heap_listp;   
+static char *heap_listp;
+static void *tree_root;   
 
 /* function prototypes for internal helper routines */
 static void *extend_heap(size_t words);
@@ -95,8 +93,417 @@ void *remove2Kids(void *rt, void *bp);
 void *findReplacement(void *bp);
 int countChildren(void *rt);
 
-static void *root;
-extern int debug;
+/* 
+ * mm_init - Initialize the memory manager 
+ */
+/* $begin mminit */
+int mm_init(void) 
+{
+    void *bp;
+
+    tree_root = NULL;
+
+    if ((heap_listp = mem_sbrk(PROLOGSIZE)) == NULL)
+        return -1;
+
+    PUT(heap_listp, 0);                        /* alignment padding */
+    PUT(heap_listp+WSIZE, PACK(OVERHEAD, 1));  /* prologue header */ 
+    PUT(heap_listp+DSIZE, PACK(OVERHEAD, 1));  /* prologue footer */ 
+    PUT(heap_listp+WSIZE+DSIZE, PACK(0, 1));   /* epilogue header */
+    heap_listp += DSIZE;
+
+    /* Extend the empty heap with a free block of CHUNKSIZE bytes */
+    bp = extend_heap(CHUNKSIZE/WSIZE);
+
+    if (bp == NULL)
+        return -1;
+
+    tree_root = treeInsert(tree_root, bp);
+
+    return 0;
+}
+/* $end mminit */
+
+/* 
+ * mm_malloc - Allocate a block with at least size bytes of payload 
+ */
+/* $begin mmmalloc */
+void *mm_malloc(size_t size) 
+{
+    size_t asize;      /* adjusted block size */
+    size_t extendsize; /* amount to extend heap if no fit */
+   
+    char *bp;   
+    /* Ignore spurious requests */
+    if (size <= 0)
+        return NULL;
+
+    /* Adjust block size to include overhead and alignment reqs. */
+    if (size <= DSIZE)
+        asize = DSIZE + OVERHEAD;
+    else
+        asize = DSIZE * ((size + (OVERHEAD) + (DSIZE-1)) / DSIZE);
+    
+    /* Search the free list for a fit */
+    if ((bp = ceiling(tree_root,asize)) != NULL) 
+    {
+        tree_root = treeRemove(tree_root,bp);
+        bp = place(bp, asize);
+        return bp;
+    }    
+    /* No fit found. Get more memory and place the block */
+    extendsize = MAX(asize,CHUNKSIZE);
+
+    if ((bp = extend_heap(extendsize/WSIZE)) == NULL)
+        return NULL;
+
+    bp = place(bp, asize);
+
+    return bp;
+} 
+/* $end mmmalloc */
+
+/* 
+ * mm_free - Free a block 
+ */
+/* $begin mmfree */
+void mm_free(void *bp)
+{
+    size_t size = GET_SIZE(HDRP(bp));
+
+    PUT(HDRP(bp), PACK(size, 0));
+    PUT(FTRP(bp), PACK(size, 0));
+    tree_root = treeInsert(tree_root,coalesce(bp));
+}
+
+/* $end mmfree */
+
+/* Not implemented. For consistency with 15-213 malloc driver */
+void *mm_realloc(void *ptr, size_t size)
+{   
+
+    void *bp;
+    size_t asize = ADJUSTSIZE(size);
+
+    if(!GETSIZE(NEXT_BLKP(ptr)))
+    {
+        size_t extendsize = MAX(asize, CHUNKSIZE); 
+        bp = extend_heap(extendsize/4);
+        size_t nsize = extendsize + GETSIZE(ptr) - asize;       
+        
+        //update header and footer
+        PUT(HDRP(ptr), PACK(asize,1));
+        PUT(FTRP(ptr), PACK(asize,1));
+        
+        //Split off extra blocks
+        void *nBlock = NEXT_BLKP(ptr);
+        PUT(HDRP(nBlock), PACK(nsize,0));
+        //nBlock = nBlock + WSIZE;
+        PUT(FTRP(nBlock), PACK(nsize, 0));
+        tree_root = treeInsert(tree_root, nBlock);
+        
+        return ptr;     
+    }
+    
+    if(!(GET_ALLOC(HDRP(NEXT_BLKP(ptr)))))
+    {
+        bp = NEXT_BLKP(ptr);
+        
+        size_t total = GETSIZE(ptr) + GETSIZE(bp);
+            
+        if(total >= asize)
+        {
+        
+            size_t nsize = total - asize;
+            tree_root = treeRemove(tree_root,bp);
+            
+            if(nsize < 16)
+            {
+                PUT(HDRP(ptr), PACK(total, 1));
+                PUT(FTRP(ptr), PACK(total, 1));
+                return ptr;
+            }
+            else 
+            {
+                PUT(HDRP(ptr), PACK(asize, 1));
+                PUT(FTRP(ptr), PACK(asize, 1));
+                
+                void *nBlock = NEXT_BLKP(ptr);
+                PUT(HDRP(nBlock), PACK(nsize,0));
+                PUT(FTRP(nBlock), PACK(nsize,0));
+                tree_root = treeInsert(tree_root, nBlock);
+                
+                return ptr;
+            }                                    
+        }
+        
+        else if(!GETSIZE(NEXT_BLKP(bp)))
+        {
+            size_t extendsize = MAX(asize, CHUNKSIZE);
+            extend_heap(extendsize/4);
+            size_t nsize = extendsize + total - asize;
+            
+            PUT(HDRP(ptr), PACK(asize,1));
+            PUT(FTRP(ptr), PACK(asize,1));
+            
+            void *nBlock = NEXT_BLKP(ptr);
+            PUT(HDRP(nBlock), PACK(nsize,0));
+            PUT(FTRP(nBlock), PACK(nsize,0));
+            tree_root = treeInsert(tree_root, nBlock);
+            return ptr;
+        }                                                       
+    }
+    
+    bp = mm_malloc(size);
+    
+    memcpy(bp, ptr, (GETSIZE(ptr) - 8));
+    mm_free(ptr);
+    return bp;  
+}
+
+/* 
+ * mm_checkheap - Check the heap for consistency 
+ */
+void mm_checkheap(int verbose) 
+{
+    char *bp = heap_listp;
+
+    if (verbose) {
+    printf("Heap (%p):\n", heap_listp);
+    printf("root: %p\n", tree_root);
+    }
+
+    if ((GET_SIZE(HDRP(heap_listp)) != DSIZE) || !GET_ALLOC(HDRP(heap_listp)))
+    printf("Bad prologue header\n");
+    checkblock(heap_listp);
+
+    for (bp = heap_listp; GET_SIZE(HDRP(bp)) > 0; bp = NEXT_BLKP(bp)) {
+    if (verbose)
+    { 
+        printblock(bp);
+                
+    }
+    checkblock(bp);
+    }
+     
+    if (verbose)
+    printblock(bp);
+    if ((GET_SIZE(HDRP(bp)) != 0) || !(GET_ALLOC(HDRP(bp))))
+    printf("Bad epilogue header\n");
+}
+
+/* The remaining routines are internal helper routines */
+
+/* 
+ * extend_heap - Extend heap with free block and return its block pointer
+ */
+/* $begin mmextendheap */
+static void *extend_heap(size_t words) 
+{
+    char *bp;
+    size_t size;
+    
+    /* Allocate an even number of words to maintain alignment */
+    size = (words % 2) ? (words+1) * WSIZE : words * WSIZE;
+    if ((int)(bp = mem_sbrk(size)) == -1) 
+    return NULL;
+
+    /* Initialize free block header/footer and the epilogue header */
+    PUT(HDRP(bp), PACK(size, 0));         /* free block header */
+    PUT(FTRP(bp), PACK(size, 0));         /* free block footer */
+    PUT(HDRP(NEXT_BLKP(bp)), PACK(0, 1)); /* new epilogue header */
+
+    /* Coalesce if the previous block was free */
+    return coalesce(bp);
+}
+/* $end mmextendheap */
+
+/* 
+ * place - Place block of asize bytes at start of free block bp 
+ *         and split if remainder would be at least minimum block size
+ */
+/* $begin mmplace */
+/* $begin mmplace-proto */
+static void *place(void *bp, size_t asize)
+/* $end mmplace-proto */
+{
+
+    
+    size_t csize = GET_SIZE(HDRP(bp));
+    size_t ssize = csize - asize; //split size   
+    if (ssize >= (DSIZE + OVERHEAD)) //if the remainder is bigger than or equal 16 split  
+    {
+    
+        size_t avg = ( GETSIZE(NEXT_BLKP(bp)) + GETSIZE(PREV_BLKP(bp)) )/2; 
+        void* larger;
+        void* smaller;
+        int side; // 0: split off end | 1: Split off front
+        
+        //find which side is larger and whcih side is smaller
+        if(GETSIZE(NEXT_BLKP(bp)) > GETSIZE(PREV_BLKP(bp)))
+        {
+            larger = NEXT_BLKP(bp);
+            smaller = PREV_BLKP(bp);
+        }
+        else
+        {
+            larger = PREV_BLKP(bp);
+            smaller = NEXT_BLKP(bp);
+        }
+         
+        //check if we should split off of the front or back
+        if(asize > avg)
+        {
+            if(PREV_BLKP(bp) == larger)
+                side = 0;
+            else 
+                side = 1;           
+        }
+        else
+        {
+            if(PREV_BLKP(bp) == larger)
+                side = 1;
+            else 
+                side = 0;
+        }
+        
+        //split depending on case
+        if(side == 0)
+        {
+            //split off the end
+            PUT(HDRP(bp), PACK(asize, 1));
+            PUT(FTRP(bp), PACK(asize, 1));
+            void* split = NEXT_BLKP(bp);
+            PUT(HDRP(split), PACK(csize-asize, 0));
+            PUT(FTRP(split), PACK(csize-asize, 0));
+            tree_root = treeInsert(tree_root,split);
+            return bp;
+        }
+        else
+        {
+            //split off the front
+            PUT(HDRP(bp), PACK(ssize,0));
+            PUT(FTRP(bp), PACK(ssize,0));
+        
+            void *aBlock = NEXT_BLKP(bp);
+            PUT(HDRP(aBlock), PACK(asize, 1));
+            PUT(FTRP(aBlock), PACK(asize, 1));
+            tree_root = treeInsert(tree_root,bp);
+            return aBlock;
+        }
+    }
+    else
+    { 
+        PUT(HDRP(bp), PACK(csize, 1));
+        PUT(FTRP(bp), PACK(csize, 1));
+        return bp;
+    }
+}
+/* $end mmplace */
+
+/* 
+ * find_fit - Find a fit for a block with asize bytes 
+ */
+/* $begin mmfirstfit */
+/* $begin mmfirstfit-proto */
+static void *find_fit(size_t asize)
+/* $end mmfirstfit-proto */
+{
+    void *bp;
+
+    /* first fit search */
+    for (bp = heap_listp; GET_SIZE(HDRP(bp)) > 0; bp = NEXT_BLKP(bp)) {
+    if (!GET_ALLOC(HDRP(bp)) && (asize <= GET_SIZE(HDRP(bp)))) {
+        return bp;
+    }
+    }
+    return NULL; /* no fit */
+}
+/* $end mmfirstfit */
+
+/*
+ * coalesce - boundary tag coalescing. Return ptr to coalesced block
+ */
+/* $begin mmfree */
+static void *coalesce(void *bp) 
+{
+    size_t prev_alloc = GET_ALLOC(FTRP(PREV_BLKP(bp)));
+    size_t next_alloc = GET_ALLOC(HDRP(NEXT_BLKP(bp)));
+    size_t size = GET_SIZE(HDRP(bp));
+
+    if (prev_alloc && next_alloc) {            /* Case 1: Neighbors both allocated */
+        return bp;
+    }
+
+    else if (prev_alloc && !next_alloc) {      /* Case 2: Only the previous is allocated*/
+        size += GET_SIZE(HDRP(NEXT_BLKP(bp)));
+        tree_root = treeRemove(tree_root, NEXT_BLKP(bp));
+        PUT(HDRP(bp), PACK(size, 0));
+        PUT(FTRP(bp), PACK(size,0));
+        return(bp);
+    }
+
+    else if (!prev_alloc && next_alloc) {      /* Case 3: Only the next is allocated */
+        size += GET_SIZE(HDRP(PREV_BLKP(bp)));
+        tree_root = treeRemove(tree_root, PREV_BLKP(bp));
+        PUT(FTRP(bp), PACK(size, 0));
+        PUT(HDRP(PREV_BLKP(bp)), PACK(size, 0));
+        return(PREV_BLKP(bp));
+    }
+
+    else {                                     /* Case 4: Neither are allocated */
+        size += GET_SIZE(HDRP(PREV_BLKP(bp))) + 
+        GET_SIZE(FTRP(NEXT_BLKP(bp)));
+        tree_root = treeRemove(tree_root, NEXT_BLKP(bp));
+        tree_root = treeRemove(tree_root, PREV_BLKP(bp));        
+        PUT(HDRP(PREV_BLKP(bp)), PACK(size, 0));
+        PUT(FTRP(NEXT_BLKP(bp)), PACK(size, 0));
+        return(PREV_BLKP(bp));
+    }
+}
+/* $end mmfree */
+
+static void printblock(void *bp) 
+{
+    size_t hsize, halloc, fsize, falloc;
+
+    hsize = GET_SIZE(HDRP(bp));
+    halloc = GET_ALLOC(HDRP(bp));  
+    fsize = GET_SIZE(FTRP(bp));
+    falloc = GET_ALLOC(FTRP(bp));  
+
+    if (hsize == 0) {
+    printf("%p: EOL\n", bp);
+    return;
+    }
+
+    if (bp == heap_listp) {
+      printf("%p: header: [%d:%c] footer: [%d:%c]\n", bp, 
+         hsize, (halloc ? 'a' : 'f'), 
+         fsize, (falloc ? 'a' : 'f')); 
+
+    } else if (!halloc) {
+      printf("%p: header: [%d:%c] | left: %p, right: %p | footer: [%d:%c]\n", bp, 
+         hsize, (halloc ? 'a' : 'f'), 
+         GETLEFT(bp),
+         GETRIGHT(bp),
+         fsize, (falloc ? 'a' : 'f')); 
+
+    } else {
+      printf("%p: header: [%d:%c] footer: [%d:%c]\n", bp, 
+         hsize, (halloc ? 'a' : 'f'), 
+         fsize, (falloc ? 'a' : 'f')); 
+    }
+  
+}
+
+static void checkblock(void *bp) 
+{
+    if ((size_t)bp % 8)
+    printf("Error: %p is not doubleword aligned\n", bp);
+    if (GET(HDRP(bp)) != GET(FTRP(bp)))
+    printf("Error: header does not match footer\n");
+}
 
 /* Tree Functions */
 
@@ -130,8 +537,8 @@ void *treeInsert(void *rt, void* bp)
         return rt;
     }
     
-    //should never reach here
-    return NULL;
+    /* If there's an error, return -1 */
+    return -1;
 }
 
 /*
@@ -145,7 +552,6 @@ void *treeInsert(void *rt, void* bp)
 
 void *treeRemove(void *rt, void *bp)
 {
-    if(debug) {printf("Start of Remove tree, Kid count is: %d", countChildren(bp));}
     if(countChildren(bp) == 0)  //If there are no children call removeFruitless
         return removeFruitless(rt, bp);
     else if(countChildren(bp) == 1) //If there is one child call removeOnlyChild
@@ -251,7 +657,6 @@ int countChildren(void *rt)
 */
 void *removeFruitless(void *rt, void *bp)
 {
-    //if(debug) {printf("RemoveFruitless Start");}
     void *pt = getParent(rt, bp); //stores the parent of the node bp
     
     if(pt != NULL)//if the parent is not NULL 
@@ -267,7 +672,6 @@ void *removeFruitless(void *rt, void *bp)
     {
         return NULL;
     }
-    //if(debug) {printf("End of removeFruitless");}
 }
 
 /*
@@ -353,460 +757,4 @@ void *findReplacement(void *bp)
         return bp;
      else //if the right is not NULL keep going right
         return findReplacement(GETRIGHT(bp));
-}
-
-
-/* 
- * mm_init - Initialize the memory manager 
- */
-/* $begin mminit */
-int mm_init(void) 
-{
-    //WSIZE = 4
-    //DSIZE = 8
-    /* create the initial empty heap */
-    //if ((heap_listp = mem_sbrk(4*WSIZE)) == NULL)
-    root = NULL; 
-    void *bp;
-    if ((heap_listp = mem_sbrk(PROLOGSIZE)) == NULL)
-        return -1;
-    PUT(heap_listp, 0);                        /* alignment padding */
-    PUT(heap_listp+WSIZE, PACK(OVERHEAD, 1));  /* prologue header */ 
-    PUT(heap_listp+DSIZE, PACK(OVERHEAD, 1));  /* prologue footer */ 
-    PUT(heap_listp+WSIZE+DSIZE, PACK(0, 1));   /* epilogue header */
-    heap_listp += DSIZE;
-
-    /* Extend the empty heap with a free block of CHUNKSIZE bytes */
-    bp = extend_heap(CHUNKSIZE/WSIZE);
-    if (bp == NULL)
-        return -1;
-    root = treeInsert(root, bp);
-    return 0;
-}
-/* $end mminit */
-
-/* 
- * mm_malloc - Allocate a block with at least size bytes of payload 
- */
-/* $begin mmmalloc */
-void *mm_malloc(size_t size) 
-{
-    size_t asize;      /* adjusted block size */
-    size_t extendsize; /* amount to extend heap if no fit */
-   
-    char *bp;   
-    /* Ignore spurious requests */
-    if (size <= 0)
-        return NULL;
-
-    /* Adjust block size to include overhead and alignment reqs. */
-    if (size <= DSIZE)
-        asize = DSIZE + OVERHEAD;
-    else
-        asize = DSIZE * ((size + (OVERHEAD) + (DSIZE-1)) / DSIZE);
-    
-    /* Search the free list for a fit */
-    if ((bp = ceiling(root,asize)) != NULL) 
-    {
-        root = treeRemove(root,bp);
-        bp = place(bp, asize);
-        return bp;
-    }    
-    /* No fit found. Get more memory and place the block */
-    extendsize = MAX(asize,CHUNKSIZE);
-    if ((bp = extend_heap(extendsize/WSIZE)) == NULL)
-        return NULL;
-        
-    //root = treeRemove(root,bp);
-    bp = place(bp, asize);
-    return bp;
-} 
-/* $end mmmalloc */
-
-/* 
- * mm_free - Free a block 
- */
-/* $begin mmfree */
-void mm_free(void *bp)
-{
-    size_t size = GET_SIZE(HDRP(bp));
-
-    PUT(HDRP(bp), PACK(size, 0));
-    PUT(FTRP(bp), PACK(size, 0));
-    root = treeInsert(root,coalesce(bp));
-}
-
-/* $end mmfree */
-
-/* Not implemented. For consistency with 15-213 malloc driver */
-void *mm_realloc(void *ptr, size_t size)
-{   
-
-    void *bp;
-    size_t asize = ADJUSTSIZE(size);
-
-    if(!GETSIZE(NEXT_BLKP(ptr)))
-    {
-        size_t extendsize = MAX(asize, CHUNKSIZE); 
-        bp = extend_heap(extendsize/4);
-        size_t nsize = extendsize + GETSIZE(ptr) - asize;       
-        
-        //update header and footer
-        PUT(HDRP(ptr), PACK(asize,1));
-        PUT(FTRP(ptr), PACK(asize,1));
-        
-        //Split off extra blocks
-        void *nBlock = NEXT_BLKP(ptr);
-        PUT(HDRP(nBlock), PACK(nsize,0));
-        //nBlock = nBlock + WSIZE;
-        PUT(FTRP(nBlock), PACK(nsize, 0));
-        root = treeInsert(root, nBlock);
-        
-        return ptr;     
-    }
-    
-    if(!(GET_ALLOC(HDRP(NEXT_BLKP(ptr)))))
-    {
-        bp = NEXT_BLKP(ptr);
-        
-        size_t total = GETSIZE(ptr) + GETSIZE(bp);
-            
-        if(total >= asize)
-        {
-        
-            size_t nsize = total - asize;
-            root = treeRemove(root,bp);
-            
-            if(nsize < 16)
-            {
-                PUT(HDRP(ptr), PACK(total, 1));
-                PUT(FTRP(ptr), PACK(total, 1));
-                return ptr;
-            }
-            else 
-            {
-                PUT(HDRP(ptr), PACK(asize, 1));
-                PUT(FTRP(ptr), PACK(asize, 1));
-                
-                void *nBlock = NEXT_BLKP(ptr);
-                PUT(HDRP(nBlock), PACK(nsize,0));
-                PUT(FTRP(nBlock), PACK(nsize,0));
-                root = treeInsert(root, nBlock);
-                
-                return ptr;
-            }                                    
-        }
-        
-        else if(!GETSIZE(NEXT_BLKP(bp)))
-        {
-            size_t extendsize = MAX(asize, CHUNKSIZE);
-            extend_heap(extendsize/4);
-            size_t nsize = extendsize + total - asize;
-            
-            PUT(HDRP(ptr), PACK(asize,1));
-            PUT(FTRP(ptr), PACK(asize,1));
-            
-            void *nBlock = NEXT_BLKP(ptr);
-            PUT(HDRP(nBlock), PACK(nsize,0));
-            PUT(FTRP(nBlock), PACK(nsize,0));
-            root = treeInsert(root, nBlock);
-            return ptr;
-        } 
-                                                                  
-    }
-    
-    bp = mm_malloc(size);
-    
-    memcpy(bp, ptr, (GETSIZE(ptr) - 8));
-    mm_free(ptr);
-    return bp;  
-}
-
-/* 
- * mm_checkheap - Check the heap for consistency 
- */
-void mm_checkheap(int verbose) 
-{
-    char *bp = heap_listp;
-
-    if (verbose) {
-    printf("Heap (%p):\n", heap_listp);
-    printf("root: %p\n", root);
-    }
-
-    if ((GET_SIZE(HDRP(heap_listp)) != DSIZE) || !GET_ALLOC(HDRP(heap_listp)))
-    printf("Bad prologue header\n");
-    checkblock(heap_listp);
-
-    for (bp = heap_listp; GET_SIZE(HDRP(bp)) > 0; bp = NEXT_BLKP(bp)) {
-    if (verbose)
-    { 
-        printblock(bp);
-/*      if(root != NULL) */
-/*              printf("Root is %p Size:%d", root, GETSIZE(root)); */
-                
-    }
-    checkblock(bp);
-    }
-     
-    if (verbose)
-    printblock(bp);
-    if ((GET_SIZE(HDRP(bp)) != 0) || !(GET_ALLOC(HDRP(bp))))
-    printf("Bad epilogue header\n");
-}
-
-/* The remaining routines are internal helper routines */
-
-/* 
- * extend_heap - Extend heap with free block and return its block pointer
- */
-/* $begin mmextendheap */
-static void *extend_heap(size_t words) 
-{
-    char *bp;
-    size_t size;
-    
-    /* Allocate an even number of words to maintain alignment */
-    size = (words % 2) ? (words+1) * WSIZE : words * WSIZE;
-    if ((int)(bp = mem_sbrk(size)) == -1) 
-    return NULL;
-
-    /* Initialize free block header/footer and the epilogue header */
-    PUT(HDRP(bp), PACK(size, 0));         /* free block header */
-    PUT(FTRP(bp), PACK(size, 0));         /* free block footer */
-    PUT(HDRP(NEXT_BLKP(bp)), PACK(0, 1)); /* new epilogue header */
-
-    /* Coalesce if the previous block was free */
-    return coalesce(bp);
-}
-/* $end mmextendheap */
-
-/* 
- * place - Place block of asize bytes at start of free block bp 
- *         and split if remainder would be at least minimum block size
- */
-/* $begin mmplace */
-/* $begin mmplace-proto */
-static void *place(void *bp, size_t asize)
-/* $end mmplace-proto */
-{
-
-    
-    size_t csize = GET_SIZE(HDRP(bp));
-    size_t ssize = csize - asize; //split size   
-    if (ssize >= (DSIZE + OVERHEAD)) //if the remainder is bigger than or equal 16 split  
-    {
-    
-        size_t avg = ( GETSIZE(NEXT_BLKP(bp)) + GETSIZE(PREV_BLKP(bp)) )/2; 
-        void* larger;
-        void* smaller;
-        int side; // 0: split off end | 1: Split off front
-        
-        //find which side is larger and whcih side is smaller
-        if(GETSIZE(NEXT_BLKP(bp)) > GETSIZE(PREV_BLKP(bp)))
-        {
-            larger = NEXT_BLKP(bp);
-            smaller = PREV_BLKP(bp);
-        }
-        else
-        {
-            larger = PREV_BLKP(bp);
-            smaller = NEXT_BLKP(bp);
-        }
-         
-        //check if we should split off of the front or back
-        if(asize > avg)
-        {
-            if(PREV_BLKP(bp) == larger)
-                side = 0;
-            else 
-                side = 1;           
-        }
-        else
-        {
-            if(PREV_BLKP(bp) == larger)
-                side = 1;
-            else 
-                side = 0;
-        }
-        
-        //split depending on case
-        if(side == 0)
-        {
-            //split off the end
-            PUT(HDRP(bp), PACK(asize, 1));
-            PUT(FTRP(bp), PACK(asize, 1));
-            void* split = NEXT_BLKP(bp);
-            PUT(HDRP(split), PACK(csize-asize, 0));
-            PUT(FTRP(split), PACK(csize-asize, 0));
-            root = treeInsert(root,split);
-            return bp;
-        }
-        else
-        {
-            //split off the front
-            PUT(HDRP(bp), PACK(ssize,0));
-            PUT(FTRP(bp), PACK(ssize,0));
-        
-            void *aBlock = NEXT_BLKP(bp);
-            PUT(HDRP(aBlock), PACK(asize, 1));
-            PUT(FTRP(aBlock), PACK(asize, 1));
-            root = treeInsert(root,bp);
-            return aBlock;
-        }
-    }
-    else
-    { 
-        PUT(HDRP(bp), PACK(csize, 1));
-        PUT(FTRP(bp), PACK(csize, 1));
-        return bp;
-    }
-}
-/* $end mmplace */
-
-/* 
- * find_fit - Find a fit for a block with asize bytes 
- */
-/* $begin mmfirstfit */
-/* $begin mmfirstfit-proto */
-static void *find_fit(size_t asize)
-/* $end mmfirstfit-proto */
-{
-    void *bp;
-
-    /* first fit search */
-    for (bp = heap_listp; GET_SIZE(HDRP(bp)) > 0; bp = NEXT_BLKP(bp)) {
-    if (!GET_ALLOC(HDRP(bp)) && (asize <= GET_SIZE(HDRP(bp)))) {
-        return bp;
-    }
-    }
-    return NULL; /* no fit */
-}
-/* $end mmfirstfit */
-
-/*
- * coalesce - boundary tag coalescing. Return ptr to coalesced block
- */
-/* $begin mmfree */
-static void *coalesce(void *bp) 
-{
-    size_t prev_alloc = GET_ALLOC(FTRP(PREV_BLKP(bp)));
-    size_t next_alloc = GET_ALLOC(HDRP(NEXT_BLKP(bp)));
-    size_t size = GET_SIZE(HDRP(bp));
-
-    if (prev_alloc && next_alloc) {            /* Case 1: Neighbors both allocated */
-        return bp;
-    }
-
-    else if (prev_alloc && !next_alloc) {      /* Case 2: Only the previous is allocated*/
-        size += GET_SIZE(HDRP(NEXT_BLKP(bp)));
-        root = treeRemove(root, NEXT_BLKP(bp));
-        PUT(HDRP(bp), PACK(size, 0));
-        PUT(FTRP(bp), PACK(size,0));
-        return(bp);
-    }
-
-    else if (!prev_alloc && next_alloc) {      /* Case 3: Only the next is allocated */
-        size += GET_SIZE(HDRP(PREV_BLKP(bp)));
-        root = treeRemove(root, PREV_BLKP(bp));
-        PUT(FTRP(bp), PACK(size, 0));
-        PUT(HDRP(PREV_BLKP(bp)), PACK(size, 0));
-        return(PREV_BLKP(bp));
-    }
-
-    else {                                     /* Case 4: Neither are allocated */
-        size += GET_SIZE(HDRP(PREV_BLKP(bp))) + 
-        GET_SIZE(FTRP(NEXT_BLKP(bp)));
-        root = treeRemove(root, NEXT_BLKP(bp));
-        root = treeRemove(root, PREV_BLKP(bp));        
-        PUT(HDRP(PREV_BLKP(bp)), PACK(size, 0));
-        PUT(FTRP(NEXT_BLKP(bp)), PACK(size, 0));
-        return(PREV_BLKP(bp));
-    }
-}
-/* $end mmfree */
-
-static void printblock(void *bp) 
-{
-    size_t hsize, halloc, fsize, falloc;
-
-    hsize = GET_SIZE(HDRP(bp));
-    halloc = GET_ALLOC(HDRP(bp));  
-    fsize = GET_SIZE(FTRP(bp));
-    falloc = GET_ALLOC(FTRP(bp));  
-
-    if (hsize == 0) {
-    printf("%p: EOL\n", bp);
-    return;
-    }
-
-    if (bp == heap_listp) {
-      printf("%p: header: [%d:%c] footer: [%d:%c]\n", bp, 
-         hsize, (halloc ? 'a' : 'f'), 
-         fsize, (falloc ? 'a' : 'f')); 
-
-    } else if (!halloc) {
-      printf("%p: header: [%d:%c] | left: %p, right: %p | footer: [%d:%c]\n", bp, 
-         hsize, (halloc ? 'a' : 'f'), 
-         GETLEFT(bp),
-         GETRIGHT(bp),
-         fsize, (falloc ? 'a' : 'f')); 
-
-    } else {
-      printf("%p: header: [%d:%c] footer: [%d:%c]\n", bp, 
-         hsize, (halloc ? 'a' : 'f'), 
-         fsize, (falloc ? 'a' : 'f')); 
-    }
-  
-}
-
-/* static void printblock(void *bp)  */
-/* { */
-/*     size_t hsize, halloc, fsize, falloc; */
-
-/*     hsize = GET_SIZE(HDRP(bp)); */
-/*     halloc = GET_ALLOC(HDRP(bp));   */
-/*     fsize = GET_SIZE(FTRP(bp)); */
-/*     falloc = GET_ALLOC(FTRP(bp));   */
-/*  /\* */
-/*  if(root != NULL) */
-/*      printf("Root is %p Size:%d", root, GETSIZE(root));  */
-/*    *\/   */
-/*     if(bp == heap_listp) */
-/*     { */
-/*      printf("Prologue Block: %p: header: [%d:%c]", bp, */
-/*      hsize, (halloc ? 'a' : 'f')); */
-/*     } */
-/*     else if(halloc == 1) */
-/*     { */
-/*       printf("Allocat4ed Block: %p: header: [%d:%c] footer: [%d:%c]\n", bp, */
-/*       hsize, (halloc ? 'a' : 'f'), */
-/*       fsize, (falloc ? 'a' : 'f')); */
-                       
-/*     } */
-/*     else if(halloc == 0) */
-/*     { */
-/*      printf("Free Block: %p: header: [%d:%c] footer: [%d:%c] Left: %p Right: %p\n", bp, */
-/*      hsize, (halloc ? 'a' : 'f'), */
-/*      fsize, (falloc ? 'a' : 'f'), */
-/*      GETLEFT(bp), GETRIGHT(bp)); */
-                          
-/*     } */
-    
-/*     if (hsize == 0) { */
-/*  printf("%p: EOL\n", bp); */
-/*  return; */
-/*     } */
-
-/*     printf("%p: header: [%d:%c] footer: [%d:%c]\n", bp,  */
-/*     hsize, (halloc ? 'a' : 'f'),  */
-/*     fsize, (falloc ? 'a' : 'f'));  */
-/* } */
-
-static void checkblock(void *bp) 
-{
-    if ((size_t)bp % 8)
-    printf("Error: %p is not doubleword aligned\n", bp);
-    if (GET(HDRP(bp)) != GET(FTRP(bp)))
-    printf("Error: header does not match footer\n");
 }
