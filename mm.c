@@ -195,7 +195,10 @@ void *mm_realloc(void *ptr, size_t size)
         
         PUT(HDRP(ptr), PACK(asize,1));
         PUT(FTRP(ptr), PACK(asize,1));
-        PUT(HDRP(blk), PACK(nsize,0));
+
+        /* Lets split up any extra blocks */
+
+        PUT(HDRP(blk), PACK(nsize, 0));
         PUT(FTRP(blk), PACK(nsize, 0));
 
         tree_root = mm_insert(tree_root, blk);
