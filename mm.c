@@ -80,15 +80,16 @@ static void printblock(void *bp);
 static void checkblock(void *bp);
 
 /* Additional function declarations */
-void *mm_insert(void *rt, void *bp);
-void *mm_remove(void *rt, void *bp);
-void *mm_ceiling(void *rt,  int size);
-void *mm_parent(void *rt, void *bp);
+void *mm_insert(void *root, void *bp);
+void *mm_remove(void *root, void *bp);
+void *mm_ceiling(void *root,  int size);
+void *mm_parent(void *root, void *bp);
 void *mm_replace(void *bp);
-void *removeFruitless(void *rt, void *bp);
-void *removeOnlyChild(void *rt, void *bp);
-void *remove2Kids(void *rt, void *bp);
-int countChildren(void *rt);
+void *mm_remove_node(void *root, void *bp);
+void *mm_remove_child(void *root, void *bp);
+void *mm_remove_children(void *root, void *bp);
+
+int mm_children(void *root);
 
 /* 
  * mm_init - Initialize the memory manager 
@@ -187,20 +188,17 @@ void *mm_realloc(void *ptr, size_t size)
 
     if(!GETSIZE(NEXT_BLKP(ptr)))
     {
-        size_t extendsize = MAX(asize, CHUNKSIZE); 
-        bp = extend_heap(extendsize/4);
-        size_t nsize = extendsize + GETSIZE(ptr) - asize;       
+        size_t size_increase = MAX(asize, CHUNKSIZE); 
+        bp = extend_heap(size_increase/WSIZE);
+        size_t nsize = size_increase + GETSIZE(ptr) - asize;
+        void *blk = NEXT_BLKP(ptr);       
         
-        //update header and footer
         PUT(HDRP(ptr), PACK(asize,1));
         PUT(FTRP(ptr), PACK(asize,1));
-        
-        //Split off extra blocks
-        void *nBlock = NEXT_BLKP(ptr);
-        PUT(HDRP(nBlock), PACK(nsize,0));
-        //nBlock = nBlock + WSIZE;
-        PUT(FTRP(nBlock), PACK(nsize, 0));
-        tree_root = mm_insert(tree_root, nBlock);
+        PUT(HDRP(blk), PACK(nsize,0));
+        PUT(FTRP(blk), PACK(nsize, 0));
+
+        tree_root = mm_insert(tree_root, blk);
         
         return ptr;     
     }
@@ -213,7 +211,6 @@ void *mm_realloc(void *ptr, size_t size)
             
         if(total >= asize)
         {
-        
             size_t nsize = total - asize;
             tree_root = mm_remove(tree_root,bp);
             
@@ -228,10 +225,10 @@ void *mm_realloc(void *ptr, size_t size)
                 PUT(HDRP(ptr), PACK(asize, 1));
                 PUT(FTRP(ptr), PACK(asize, 1));
                 
-                void *nBlock = NEXT_BLKP(ptr);
-                PUT(HDRP(nBlock), PACK(nsize,0));
-                PUT(FTRP(nBlock), PACK(nsize,0));
-                tree_root = mm_insert(tree_root, nBlock);
+                void *blk = NEXT_BLKP(ptr);
+                PUT(HDRP(blk), PACK(nsize,0));
+                PUT(FTRP(blk), PACK(nsize,0));
+                tree_root = mm_insert(tree_root, blk);
                 
                 return ptr;
             }                                    
@@ -239,17 +236,17 @@ void *mm_realloc(void *ptr, size_t size)
         
         else if(!GETSIZE(NEXT_BLKP(bp)))
         {
-            size_t extendsize = MAX(asize, CHUNKSIZE);
-            extend_heap(extendsize/4);
-            size_t nsize = extendsize + total - asize;
+            size_t size_increase = MAX(asize, CHUNKSIZE);
+            extend_heap(size_increase/WSIZE);
+            size_t nsize = size_increase + total - asize;
+            void *blk = NEXT_BLKP(ptr);
             
             PUT(HDRP(ptr), PACK(asize,1));
             PUT(FTRP(ptr), PACK(asize,1));
-            
-            void *nBlock = NEXT_BLKP(ptr);
-            PUT(HDRP(nBlock), PACK(nsize,0));
-            PUT(FTRP(nBlock), PACK(nsize,0));
-            tree_root = mm_insert(tree_root, nBlock);
+            PUT(HDRP(blk), PACK(nsize,0));
+            PUT(FTRP(blk), PACK(nsize,0));
+
+            tree_root = mm_insert(tree_root, blk);
             return ptr;
         }                                                       
     }
@@ -334,7 +331,12 @@ static void *place(void *bp, size_t asize)
         size_t avg = (GETSIZE(NEXT_BLKP(bp)) + GETSIZE(PREV_BLKP(bp)))/2; 
         void* large;
         void* small;
-        int side; // 0: split off end | 1: Split off front
+        int split_side;
+
+        /* Which side should we split on? Let split_side = 0 or 1
+           0 = Let's split the end
+           1 = Let's split the front 
+        */
         
         if(GETSIZE(NEXT_BLKP(bp)) > GETSIZE(PREV_BLKP(bp)))
         {
@@ -347,45 +349,48 @@ static void *place(void *bp, size_t asize)
             small = NEXT_BLKP(bp);
         }
          
-        //check if we should split off of the front or back
         if(asize > avg)
         {
             if(PREV_BLKP(bp) == large)
-                side = 0;
+                split_side = 0;
             else 
-                side = 1;           
+                split_side = 1;           
         }
         else
         {
             if(PREV_BLKP(bp) == large)
-                side = 1;
+                split_side = 1;
             else 
-                side = 0;
+                split_side = 0;
         }
         
-        //split depending on case
-        if(side == 0)
+        if(split_side != 1)
         {
-            //split off the end
             PUT(HDRP(bp), PACK(asize, 1));
             PUT(FTRP(bp), PACK(asize, 1));
+
             void* split = NEXT_BLKP(bp);
+
             PUT(HDRP(split), PACK(csize-asize, 0));
             PUT(FTRP(split), PACK(csize-asize, 0));
+
             tree_root = mm_insert(tree_root,split);
+
             return bp;
         }
         else
         {
-            //split off the front
             PUT(HDRP(bp), PACK(split_size,0));
             PUT(FTRP(bp), PACK(split_size,0));
         
-            void *aBlock = NEXT_BLKP(bp);
-            PUT(HDRP(aBlock), PACK(asize, 1));
-            PUT(FTRP(aBlock), PACK(asize, 1));
+            void *blk = NEXT_BLKP(bp);
+
+            PUT(HDRP(blk), PACK(asize, 1));
+            PUT(FTRP(blk), PACK(asize, 1));
+
             tree_root = mm_insert(tree_root,bp);
-            return aBlock;
+
+            return blk;
         }
     }
     else
@@ -507,33 +512,29 @@ static void checkblock(void *bp)
 }
 
 /*
-*Inserts a free block of memory into the Binary Tree and returns a pointer 
-*to the new root of the tree
-*
-*@param rt  Pointer to the root of a tree or subtree
-*@param bp  Pointer to the node to be inserted into the tree
-*@return    Pointer to the new root of the tree
-*/
-void *mm_insert(void *rt, void* bp)
+ * mm_insert - Insert a free block into the Binary Tree and return bp
+ */
+void *mm_insert(void *root, void* bp)
 {
-    //if the tree is empty set the leaves of the node to NULL and return
-    if(rt == NULL)
+    /* Determine if the tree is empty and initiate all nodes to NULL */
+
+    if(root == NULL)
     {
         SETLEFT(bp, NULL);
         SETRIGHT(bp, NULL);
         return bp;
     }
-    //if the new node bp is smaller or equal to the current node rt insert it into the left subtree
-    else if(GETSIZE(bp) <= GETSIZE(rt))
+
+    else if(GETSIZE(bp) <= GETSIZE(root))
     {
-        SETLEFT(rt, mm_insert(LEFT(rt),bp));
-        return rt;
+        SETLEFT(root, mm_insert(LEFT(root),bp));
+        return root;
     }
-    //if the new node bp is larger than the current node rt insert rt into the right subtree
-    else if(GETSIZE(bp) >  GETSIZE(rt))
+
+    else if(GETSIZE(bp) >  GETSIZE(root))
     {
-        SETRIGHT(rt, mm_insert(RIGHT(rt),bp));
-        return rt;
+        SETRIGHT(root, mm_insert(RIGHT(root),bp));
+        return root;
     }
     
     /* If there's an error, return -1 */
@@ -541,219 +542,187 @@ void *mm_insert(void *rt, void* bp)
 }
 
 /*
-*Removes the given node from the tree and returns a pointer to the 
-*new root
-*
-*@param rt  Pointer to the root of a tree or subtree
-*@param bp  Pointer to the node to be removed from the tree
-*@return    Pointer to the new root of the tree, returns NULL if tree is empty
-*/
-
-void *mm_remove(void *rt, void *bp)
+ * mm_remove - Remove a node from the Binary Tree
+ */
+void *mm_remove(void *root, void *bp)
 {
-    if(countChildren(bp) == 0)  //If there are no children call removeFruitless
-        return removeFruitless(rt, bp);
-    else if(countChildren(bp) == 1) //If there is one child call removeOnlyChild
-        return removeOnlyChild(rt, bp);
-    else // else call remove2Kids
-        return remove2Kids(rt, bp);
+    /* Determine if there are any children, if not, remove the node */
+
+    if(mm_children(bp) == 0)
+        return mm_remove_node(root, bp);
+
+    else if(mm_children(bp) == 1)
+        return mm_remove_child(root, bp);
+
+    else
+        return mm_remove_children(root, bp);
 }
 
 /*
-*Finds a pointer to the node that is the best fit for a given size
-*A best fit is the smallest node that is bigger than the size or that is the same size
-*
-*@param rt  Pointer to the root of a tree or subtree
-*@param bp  Size that we are looking for
-*@return    Pointer to the node that is the best size, returns NULL if tree is empty
-*/
-void * mm_ceiling(void* rt, int size)
+ * mm_ceiling - Locate a node that best fits in a free block and return its pointer
+ */
+void * mm_ceiling(void* root, int size)
 {
-    void* candidate; //stores the current best fit that has been found
+    void* best_fit;
+
+    /* Retrieve the best fit, check its size and determine if it works */
     
-    //checks if the node is NULL, or empty and return NULL
-    if(rt == NULL)
+    if(root == NULL)
         return NULL;
         
-    int rtSize = GETSIZE(rt); //the size of the current node or the root
+    int root_size = GETSIZE(root);
     
-    if(rtSize  ==  size)//check if the current node is a perfect fit
-        return rt;
-    else if(rtSize > size)// if the node is bigger check the left and store it in candidate
-        candidate = mm_ceiling(LEFT(rt), size);
-    else if (rtSize < size)// if node is small check the right and store it in candidate
-        candidate = mm_ceiling(RIGHT(rt), size);
-    
-    //if child is NULL check if it can fit in current Node, if it is not return NULL
-    if(candidate == NULL)
+    if(root_size  ==  size)
+        return root;
+
+    else if(root_size > size)
+        best_fit = mm_ceiling(LEFT(root), size);
+
+    else if (root_size < size)
+        best_fit = mm_ceiling(RIGHT(root), size);
+
+    /* Determine size of child and see if the node is a good fit */
+    if(best_fit == NULL)
     {
-        //is current node too small return NULL
-        if(rtSize < size)
+        if(root_size < size) /* If it's too small, return NULL */
             return NULL;
         else 
-            return rt; //return the last best fit
+            return root;
     }
-    //return the best fit
     else 
-        return candidate; // if it is not NULL just return
+        return best_fit;
                     
 }
 
 
-/* Tree Helper Functions */
-
 /*
-*Get the Parent of a given node bp
-*
-*@param rt  Pointer to the current tree or subtree being checked
-*@param bp  Pointer to the node that is looking for its parent
-*@return    Pointer to the parent of the given node bp, returns NULL if bp us the root
-*/
-void *mm_parent(void *rt, void *bp)
+ * mm_parent - Retrieve the parent node of a child node
+ */
+void *mm_parent(void *root, void *bp)
 {
-    if(bp == rt) //if the node is the root return NULL
+    if(bp == root)
         return NULL;
-    if(GETSIZE(bp) <= GETSIZE(rt)) //if the size of bp is less than or equal to the size of the current node rt 
+
+    if(GETSIZE(bp) <= GETSIZE(root))
     {
-        if(LEFT(rt) == bp)//check if the child on the left is bp, if it is return the current node
-            return rt;
-        else //if the left child is not bp check its children
-            return mm_parent(LEFT(rt),bp);
+        if(LEFT(root) == bp)
+            return root;
+        else
+            return mm_parent(LEFT(root),bp);
     }
-    else //if the size of bp is great than the size of the current node rt 
+    else
     {
-        if(RIGHT(rt) == bp) // check if the right child is bp, if it is return the current node
-            return rt;
-        else //if the right child is not bp check the children of the right child
-            return mm_parent(RIGHT(rt),bp);
+        if(RIGHT(root) == bp)
+            return root;
+        else
+            return mm_parent(RIGHT(root),bp);
     }
 } 
 
 /*
-*Counts the number of children a given node rt has
-*
-*@param rt  Pointer to the node to have its children counted
-*@return    Returns the number of children a node has (1,2, or 3)
-*/
-int countChildren(void *rt)
+ * mm_children - Return the number of children under a given root node
+ */
+int mm_children(void *root)
 {
-    int count = 0;// counter startting at 0
-    if(LEFT(rt) != NULL)//if there is a child on the left increase the counter
-         count++;
-    if(RIGHT(rt) != NULL)//if there is a child on the right increase the counter
-         count++;
+    int child_num = 0;
+
+    /* Do we have any children on either side? */
+
+    if(LEFT(root) != NULL)
+         child_num++;
+    if(RIGHT(root) != NULL)
+         child_num++;
                             
-    return count;// return the final count
+    return child_num;
 }         
 
 /*
-*Removes the given node bp from the tree
-*bp must have no children
-*
-*@param rt  Pointer to root of the tree or subtree
-*@param bp  Pointer to the node to be removed
-*@return    returns the pointer to the new root of the tree
-*/
-void *removeFruitless(void *rt, void *bp)
+ * mm_remove_node - If a given node has no children, lets remove it.
+ */
+void *mm_remove_node(void *root, void *bp)
 {
-    void *pt = mm_parent(rt, bp); //stores the parent of the node bp
+    void *parent_node = mm_parent(root, bp);
     
-    if(pt != NULL)//if the parent is not NULL 
+    if(parent_node != NULL)
     {
-        //check which side the node bp is on of the parent then have it point to NULL
-        if(LEFT(pt) == bp) 
-            SETLEFT(pt, NULL);
+        if(LEFT(parent_node) == bp) 
+            SETLEFT(parent_node, NULL);
         else 
-            SETRIGHT(pt, NULL);
-        return rt;
+            SETRIGHT(parent_node, NULL);
+        return root;
     } 
-    else //if it is the root set the root to NULL and return NULL 
+    else
     {
         return NULL;
     }
 }
 
 /*
-*Removes the given node bp from the tree
-*bp must have exactly 1 child
-*
-*@param rt  Pointer to root of the tree or subtree
-*@param bp  Pointer to the node to be removed
-*@return    returns the pointer to the new root of the tree
-*/
-void *removeOnlyChild(void *rt, void* bp)
+ * mm_remove_child - Remove the node from the Binary Tree as long as it has one child
+ */
+void *mm_remove_child(void *root, void* bp)
 {
-    void *child;//store the child of bp
+    void *parent_node = mm_parent(root, bp);
+    void *child;
     
-    //gets the child of bp
+    /* Who is our child? Where is it? */
+
     if(LEFT(bp) != NULL)
         child = LEFT(bp);
     else
         child = RIGHT(bp);
-                
-    void *pt = mm_parent(rt, bp); //get the parent of bp
 
-    //if bp is not the root replace its child with the child of its child
-    if(pt != NULL)
+    if(parent_node != NULL)
     {
-        if(LEFT(pt) == bp)
-            SETLEFT(pt, child);
+        if(LEFT(parent_node) == bp)
+            SETLEFT(parent_node, child);
         else 
-            SETRIGHT(pt, child); 
-        return rt;
+            SETRIGHT(parent_node, child); 
+        return root;
     }
-    else // if it is the root set the root to the child and return the child
+    else
     {
         return child;                               
     }
 }
 
 /*
-*Removes the given node bp from the tree
-*bp must have exactly 2 pieces of child
-*
-*@param rt  Pointer to root of the tree or subtree
-*@param bp  Pointer to the node to be removed
-*@return    returns the pointer to the new root of the tree
-*/
-void *remove2Kids(void *rt, void *bp)
+ * mm_remove_children - Remove the node from the Binary Tree as long as it has two children
+ */
+void *mm_remove_children(void *root, void *bp)
 {
-    void *pt = mm_parent(rt, bp); //gets the parent of bp
-    void *replacement = mm_replace(LEFT(bp)); //gets the replacement for the removed node bp
+    void *parent_node = mm_parent(root, bp);
+    void *replacement = mm_replace(LEFT(bp));
+    void *new_bp;
     
-    void *bpLeft; //stores the new tree after replacement has been removed
+    /* Remove the replacement and store the new bp */
+
+    new_bp = mm_remove(LEFT(bp), replacement);
     
-    bpLeft = mm_remove(LEFT(bp), replacement);//removes the replacement and stores the new tree
-    
-    //set the children of the replacement to bp's children
-    SETLEFT(replacement, bpLeft);
+    SETLEFT(replacement, new_bp);
     SETRIGHT(replacement, RIGHT(bp));
     
-    if(pt != NULL)// if it is not the root insert the replacement 
+    if(parent_node != NULL) 
     {
-        if(LEFT(pt) == bp)
-            SETLEFT(pt, replacement);
+        if(LEFT(parent_node) == bp)
+            SETLEFT(parent_node, replacement);
         else
-            SETRIGHT(pt, replacement);
-        return rt; //return the new tree
+            SETRIGHT(parent_node, replacement);
+        return root;
     }
-    else //if it is the root set the root to the replacement and return it
+    else
     {
         return replacement; 
-    }   
-              
+    }
 }
+
 /*
-*Finds the replacement for replacing parents two children
-*must me the left of the node to be replaced
-*
-*@param bp  the left node of the node being replaced
-*@return    node that is to be a replacement
-*/
+ * mm_replace - Locate the replacement for the parents' two children
+ */
 void *mm_replace(void *bp)
 {
-     if(RIGHT(bp) == NULL) //check if there right is NULL, if it is return bp
+     if(RIGHT(bp) == NULL)
         return bp;
-     else //if the right is not NULL keep going right
+     else
         return mm_replace(RIGHT(bp));
 }
