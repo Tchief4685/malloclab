@@ -7,7 +7,7 @@ TRACEDIR = /home/CSTCIS/glancast/374class/malloclab/traces/
 LOCALTRACEDIRNM = traces
 LOCALTRACEDIR = traces/
 CC = gcc
-CFLAGS = -Wall -O2
+CFLAGS = -Wall -g
 
 OBJS = mdriver.o mm.o memlib.o fsecs.o fcyc.o clock.o ftimer.o
 
